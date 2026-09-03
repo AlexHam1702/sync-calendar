@@ -4,15 +4,17 @@ import hashlib
 import json
 import os
 import sys
+import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from playwright.sync_api import sync_playwright
 import requests
 
-PORTAL_URL = os.environ["AURIGA_PORTAL_URL"]
-SCHEDULE_API_URL = os.environ["AURIGA_API_URL"]
-AUTH_STATE_B64 = os.environ["AURIGA_AUTH_STATE"]
-CALENDAR_ID = os.environ["GOOGLE_CALENDAR_ID"]
+PORTAL_URL = os.environ["AURIGA_PORTAL_URL"].strip().strip('"').strip("'")
+SCHEDULE_API_URL = os.environ["AURIGA_API_URL"].strip().strip('"').strip("'")
+AUTH_STATE_B64 = os.environ["AURIGA_AUTH_STATE"].strip()
+CALENDAR_ID = os.environ["GOOGLE_CALENDAR_ID"].strip()
 SA_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 
 
@@ -43,7 +45,6 @@ def get_token_from_session() -> str:
 
         try:
             page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
-            # Give SPA/Keycloak adapter time to exchange tokens
             page.wait_for_timeout(5000)
         except Exception as e:
             print(f"Navigation warning: {e}", file=sys.stderr)
@@ -89,14 +90,12 @@ def fetch_interventions(token: str, start_date: datetime, end_date: datetime) ->
 
 def parse_event(item: dict) -> dict:
     """Maps Auriga REST JSON schema to a Google Calendar event payload."""
-    # 1. Course title
     pedagogy = item.get("interventionPedagogicalUnits", [])
     title = "Cours"
     if pedagogy:
         pu_caption = pedagogy[0].get("pedagogicalUnit", {}).get("caption", {})
         title = pu_caption.get("fr") or pu_caption.get("en") or title
 
-    # 2. Rooms
     rooms = [
         res.get("resource", {}).get("caption", {}).get("fr", "")
         for res in item.get("interventionResources", [])
@@ -104,19 +103,16 @@ def parse_event(item: dict) -> dict:
     ]
     location = ", ".join(filter(None, rooms))
 
-    # 3. Instructors
     teachers = [
         f"{i.get('person', {}).get('currentFirstName', '')} {i.get('person', {}).get('currentLastName', '')}".strip()
         for i in item.get("interventionInstructors", [])
     ]
 
-    # 4. Student cohort / groups
     groups = [
         p.get("population", {}).get("caption", {}).get("fr", "")
         for p in item.get("interventionPopulations", [])
     ]
 
-    # 5. Metadata
     activity = item.get("activityType", {}).get("caption", {}).get("fr", "")
     status = item.get("interventionStatus", {}).get("caption", {}).get("fr", "Planifié")
 
@@ -130,7 +126,6 @@ def parse_event(item: dict) -> dict:
     ]
     description = "\n".join(filter(None, desc_lines))
 
-    # Deterministic base32hex/hex ID to allow idempotent upserts
     event_id = hashlib.sha256(f"auriga_{item['id']}".encode()).hexdigest()[:32]
 
     return {
@@ -144,7 +139,7 @@ def parse_event(item: dict) -> dict:
 
 
 def sync_to_google(events: list):
-    """Inserts or updates events in the specified Google Calendar."""
+    """Inserts or updates events in the specified Google Calendar with backoff."""
     creds = service_account.Credentials.from_service_account_info(
         SA_INFO, scopes=["https://www.googleapis.com/auth/calendar"]
     )
@@ -153,16 +148,39 @@ def sync_to_google(events: list):
     synced_count = 0
     for event in events:
         eid = event["id"]
-        try:
-            service.events().import_(calendarId=CALENDAR_ID, body=event).execute()
-            synced_count += 1
-        except Exception as e:
-            # Event already exists -> update room, time, or instructor details
-            if "409" in str(e) or "duplicate" in str(e).lower():
-                service.events().patch(calendarId=CALENDAR_ID, eventId=eid, body=event).execute()
+        max_retries = 5
+
+        for attempt in range(max_retries):
+            try:
+                service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
                 synced_count += 1
-            else:
-                print(f"Error syncing event {eid}: {e}", file=sys.stderr)
+                break
+            except HttpError as e:
+                if e.resp.status == 409:
+                    try:
+                        service.events().patch(
+                            calendarId=CALENDAR_ID, eventId=eid, body=event
+                        ).execute()
+                        synced_count += 1
+                    except Exception as patch_err:
+                        print(f"Error patching event {eid}: {patch_err}", file=sys.stderr)
+                    break
+                elif e.resp.status in [500, 502, 503, 429]:
+                    wait_time = (2**attempt) * 0.5
+                    time.sleep(wait_time)
+                    if attempt == max_retries - 1:
+                        print(
+                            f"Failed event {eid} after {max_retries} attempts: {e}",
+                            file=sys.stderr,
+                        )
+                else:
+                    print(f"Error syncing event {eid}: {e}", file=sys.stderr)
+                    break
+            except Exception as e:
+                print(f"Unexpected error on event {eid}: {e}", file=sys.stderr)
+                break
+
+        time.sleep(0.2)
 
     print(f"Successfully processed {synced_count}/{len(events)} events.")
 
@@ -171,7 +189,6 @@ if __name__ == "__main__":
     print("Retrieving access token...")
     token = get_token_from_session()
 
-    # Sync a rolling 4-week window (from yesterday to +28 days)
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=1)
     end = now + timedelta(days=28)
