@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests playwright google-api-python-client google-auth
+          pip install -r requirements.txt
           playwright install --with-deps chromium
 
       - name: Run Calendar Sync
