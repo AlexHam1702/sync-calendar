@@ -1,0 +1,35 @@
+name: Auriga Schedule Sync
+
+on:
+  schedule:
+    # Runs at 05:00 UTC and 17:00 UTC every day
+    - cron: '0 5,17 * * *'
+  workflow_dispatch: # Allows manual trigger via the GitHub Actions UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests playwright google-api-python-client google-auth
+          playwright install --with-deps chromium
+
+      - name: Run Calendar Sync
+        env:
+          AURIGA_PORTAL_URL: ${{ secrets.AURIGA_PORTAL_URL }}
+          AURIGA_API_URL: ${{ secrets.AURIGA_API_URL }}
+          AURIGA_AUTH_STATE: ${{ secrets.AURIGA_AUTH_STATE }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python sync_auriga.py
