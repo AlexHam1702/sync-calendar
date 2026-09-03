@@ -186,16 +186,35 @@ def sync_to_google(events: list):
 
 
 if __name__ == "__main__":
-    print("Retrieving access token...")
-    token = get_token_from_session()
+  print("Retrieving access token...")
+  token = get_token_from_session()
 
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=1)
-    end = now + timedelta(days=28)
+  now = datetime.now(timezone.utc)
+
+  # Fetch schedule across a 16-week window (~4 months) in 4-week chunks
+  total_weeks = 16
+  chunk_days = 28
+  all_interventions = []
+  seen_ids = set()
+
+  for chunk_offset in range(0, total_weeks * 7, chunk_days):
+    start = (now - timedelta(days=1)) + timedelta(days=chunk_offset)
+    end = start + timedelta(days=chunk_days)
 
     print(f"Fetching schedule from {start.date()} to {end.date()}...")
-    interventions = fetch_interventions(token, start, end)
-    print(f"Found {len(interventions)} classes.")
+    try:
+      chunk = fetch_interventions(token, start, end)
+      for item in chunk:
+        if item["id"] not in seen_ids:
+          seen_ids.add(item["id"])
+          all_interventions.append(item)
+    except Exception as e:
+      print(f"Failed to fetch chunk {start.date()} to {end.date()}: {e}")
 
-    parsed = [parse_event(item) for item in interventions]
-    sync_to_google(parsed)
+  print(
+      f"Found a total of {len(all_interventions)} unique classes across"
+      f" {total_weeks} weeks."
+  )
+
+  parsed = [parse_event(item) for item in all_interventions]
+  sync_to_google(parsed)
