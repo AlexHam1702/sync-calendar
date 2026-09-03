@@ -3,7 +3,7 @@ name: Auriga Schedule Sync
 on:
   schedule:
     # Runs at 05:00 UTC and 17:00 UTC every day
-    - cron: '0 5,17 * * *'
+    - cron: '0 5,12,17 * * *'
   workflow_dispatch: # Allows manual trigger via the GitHub Actions UI
 
 jobs:
