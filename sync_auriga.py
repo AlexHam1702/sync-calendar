@@ -19,48 +19,73 @@ SA_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 
 
 def get_token_from_session() -> str:
-    """Restores session state in headless browser and intercepts the Keycloak Bearer token."""
-    auth_json_path = "auth.json"
-    with open(auth_json_path, "wb") as f:
-        f.write(base64.b64decode(AUTH_STATE_B64))
+  """Restores session state in headless browser and intercepts the Keycloak Bearer token."""
+  auth_json_path = "auth.json"
+  with open(auth_json_path, "wb") as f:
+    f.write(base64.b64decode(AUTH_STATE_B64))
 
-    captured_token = None
+  captured_token = None
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=auth_json_path)
-        page = context.new_page()
+  with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    context = browser.new_context(storage_state=auth_json_path)
+    page = context.new_page()
 
-        def handle_response(response):
-            nonlocal captured_token
-            if "/protocol/openid-connect/token" in response.url and response.status == 200:
-                try:
-                    data = response.json()
-                    if "access_token" in data:
-                        captured_token = data["access_token"]
-                except Exception:
-                    pass
-
-        page.on("response", handle_response)
-
+    def handle_response(response):
+      nonlocal captured_token
+      if (
+          "/protocol/openid-connect/token" in response.url
+          and response.status == 200
+      ):
         try:
-            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(5000)
-        except Exception as e:
-            print(f"Navigation warning: {e}", file=sys.stderr)
+          data = response.json()
+          if "access_token" in data:
+            captured_token = data["access_token"]
+        except Exception:
+          pass
 
-        browser.close()
+    page.on("response", handle_response)
 
-    if os.path.exists(auth_json_path):
-        os.remove(auth_json_path)
+    try:
+      page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
 
-    if not captured_token:
-        raise RuntimeError(
-            "Failed to retrieve access token. Your session has likely expired. "
-            "Please re-run `python setup_auth.py` locally and update the AURIGA_AUTH_STATE secret."
-        )
+      # 1. If Microsoft shows 'Pick an account', click the saved account
+      account_tile = page.locator("div.table-row, div[data-test-id]")
+      if account_tile.count() > 0 and account_tile.first.is_visible():
+        account_tile.first.click()
+        page.wait_for_timeout(3000)
 
-    return captured_token
+      # 2. If Keycloak presents a 'Sign in with Microsoft' button, click it
+      ms_btn = page.locator("a:has-text('Microsoft'), #social-oidc")
+      if ms_btn.count() > 0 and ms_btn.first.is_visible():
+        ms_btn.first.click()
+        page.wait_for_timeout(3000)
+
+      # 3. Allow up to 15 seconds for token callbacks to finish
+      for _ in range(15):
+        if captured_token:
+          break
+        page.wait_for_timeout(1000)
+
+      print(f"Debug - Current URL: {page.url}")
+      print(f"Debug - Page Title: {page.title()}")
+
+    except Exception as e:
+      print(f"Navigation warning: {e}", file=sys.stderr)
+
+    browser.close()
+
+  if os.path.exists(auth_json_path):
+    os.remove(auth_json_path)
+
+  if not captured_token:
+    raise RuntimeError(
+        "Failed to retrieve access token. Your session has likely expired. "
+        "Please re-run `python setup_auth.py` locally and update the"
+        " AURIGA_AUTH_STATE secret."
+    )
+
+  return captured_token
 
 
 def fetch_interventions(token: str, start_date: datetime, end_date: datetime) -> list:
